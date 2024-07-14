@@ -5,6 +5,7 @@ from torchvision import transforms
 from typing import Tuple
 from termcolor import cprint
 from PIL import Image
+from sklearn.preprocessing import LabelEncoder
 
 
 
@@ -17,16 +18,19 @@ class ThingsIMGDataset(torch.utils.data.Dataset):
         self.num_classes = 1854
 
         self.image_size = image_size
+        label_encoder = LabelEncoder()
 
         path_list = []
+        label_list = []
         with open(os.path.join(data_dir, f"{split}_image_paths.txt"), 'r', encoding='utf-8') as file:
             for line in file:
                 path = os.path.join(data_dir, "images", line.strip())
+                label_list.append(os.path.dirname(line))
                 path_list.append(path)
 
+        
         self.img_path = path_list
-        self.y = torch.load(os.path.join(data_dir, f"{split}_y.pt"))
-        assert len(torch.unique(self.y)) == self.num_classes, "Number of classes do not match."
+        self.y = label_encoder.fit_transform(label_list)
 
         self.transform = transforms.ToTensor()
 
@@ -36,7 +40,7 @@ class ThingsIMGDataset(torch.utils.data.Dataset):
     def __getitem__(self, i):
         img = Image.open(self.img_path[i])
         img_array = np.array(img).reshape((self.image_size, self.image_size)).flatten()
-        return self.transform(img_array), self.y[i]
+        return self.transform(img_array), self.transform(self.y[i])
     
     @property
     def num_channels(self) -> int:

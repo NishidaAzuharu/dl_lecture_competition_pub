@@ -10,9 +10,25 @@ from termcolor import cprint
 from tqdm import tqdm
 
 from src.datasets import ThingsIMGDataset
-from src.models import BasicConvClassifier
+from src.models import BasicConvClassifier, MAE_ViT
 from src.utils import set_seed
 
+
+config = {
+    "image_size": [32, 32],
+    "patch_size": [2, 2],
+    "emb_dim": 192,
+    "enc_layers": 12,
+    "enc_heads": 3,
+    "enc_dim_head": 64,
+    "enc_mlp_dim": 192,
+    "dec_layers": 4,
+    "dec_heads": 3,
+    "dec_dim_head": 64,
+    "dec_mlp_dim": 192,
+    "mask_ratio": 0.75,
+    "dropout": 0.
+}
 
 @hydra.main(version_base=None, config_path="configs", config_name="config") #configfileの指定
 def run(args: DictConfig):
@@ -36,11 +52,8 @@ def run(args: DictConfig):
     # ------------------
     #       Model
     # ------------------
-    model = BasicConvClassifier(
-        train_set.num_classes, train_set.seq_len, train_set.num_channels
-    ).to(args.device)
+    model = MAE_ViT(**config).to(args.device)
 
-    print(model)
 
     # ------------------
     #     Optimizer

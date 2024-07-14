@@ -1,6 +1,7 @@
 import os, sys
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torchmetrics import Accuracy
 import hydra
@@ -10,8 +11,8 @@ from termcolor import cprint
 from tqdm import tqdm
 
 from src.datasets import ThingsMEGDataset
-from src.models import BasicConvClassifier
-from src.utils import set_seed
+from src.models import BasicConvClassifier, model_3, pretrained_model
+from src.utils import set_seed, get_lr
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="config") #configfileの指定
@@ -39,16 +40,20 @@ def run(args: DictConfig):
     # ------------------
     #       Model
     # ------------------
-    model = BasicConvClassifier(
-        train_set.num_classes, train_set.seq_len, train_set.num_channels
-    ).to(args.device)
+    #model = BasicConvClassifier(train_set.num_classes, train_set.seq_len, train_set.num_channels).to(args.device)
 
-    print(model)
+    #model = model_3(train_set.num_channels, 768, train_set.num_classes).to(args.device)
+
+    model = pretrained_model(train_set.num_classes, train_set.num_channels, train_set.seq_len).to(args.device)
+
+
 
     # ------------------
     #     Optimizer
     # ------------------
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    sched = torch.optim.lr_scheduler.OneCycleLR(optimizer, 0.01, epochs=args.epochs, steps_per_epoch=len(train_loader))
+    grad_clip = 0.1
 
     # ------------------
     #   Start training
@@ -58,7 +63,6 @@ def run(args: DictConfig):
         task="multiclass", num_classes=train_set.num_classes, top_k=10
     ).to(args.device)
       
-    flag = True
     for epoch in range(args.epochs):
         print(f"Epoch {epoch+1}/{args.epochs}")
         
@@ -66,9 +70,6 @@ def run(args: DictConfig):
         
         model.train()
         for X, y, subject_idxs in tqdm(train_loader, desc="Train"):
-            if flag:
-                print("Xのサイズ->", X.shape)
-                flag = False
             X, y = X.to(args.device), y.to(args.device)
 
             y_pred = model(X)
@@ -78,7 +79,10 @@ def run(args: DictConfig):
             
             optimizer.zero_grad()
             loss.backward()
+            nn.utils.clip_grad_value_(model.parameters(), grad_clip)
             optimizer.step()
+            optimizer.zero_grad()
+            sched.step()
             
             acc = accuracy(y_pred, y)
             train_acc.append(acc.item())
