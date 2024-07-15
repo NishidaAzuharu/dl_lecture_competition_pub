@@ -8,9 +8,10 @@ from omegaconf import DictConfig
 import wandb
 from termcolor import cprint
 from tqdm import tqdm
+import torch.nn as nn
 
-from src.datasets import ThingsIMGDataset
-from src.models import BasicConvClassifier, MAE_ViT
+from src.datasets import ThingsPretrainDataset
+from src.models import BasicConvClassifier, CLIP
 from src.utils import set_seed
 
 
@@ -43,22 +44,22 @@ def run(args: DictConfig):
     # ------------------
     loader_args = {"batch_size": args.batch_size, "num_workers": args.num_workers}
     
-    train_set = ThingsIMGDataset("train", args.data_dir)
+    train_set = ThingsPretrainDataset("train", args.data_dir)
     train_loader = torch.utils.data.DataLoader(train_set, shuffle=True, **loader_args)
-    val_set = ThingsIMGDataset("val", args.data_dir)
+    val_set = ThingsPretrainDataset("val", args.data_dir)
     val_loader = torch.utils.data.DataLoader(val_set, shuffle=False, **loader_args)
     
 
     # ------------------
     #       Model
     # ------------------
-    model = MAE_ViT(**config).to(args.device)
+    model = CLIP(**config).to(args.device)
 
 
     # ------------------
     #     Optimizer
     # ------------------
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9,0.98),eps=1e-6, weight_decay=0.2)
 
     # ------------------
     #   Start training
@@ -67,31 +68,26 @@ def run(args: DictConfig):
     accuracy = Accuracy(
         task="multiclass", num_classes=train_set.num_classes, top_k=10
     ).to(args.device)
-      
-    flag = True
-    for epoch in range(args.epochs):
+
+    loss = nn.CrossEntropyLoss()
+    for epoch in range(args.pretrain_epochs):
         print(f"Epoch {epoch+1}/{args.epochs}")
         
         train_loss, train_acc, val_loss, val_acc = [], [], [], []
         
         model.train()
-        for X, y, subject_idxs in tqdm(train_loader, desc="Train"):
-            if flag:
-                print("Xのサイズ->", X.shape)
-                flag = False
-            X, y = X.to(args.device), y.to(args.device)
-
-            y_pred = model(X)
-            
-            loss = F.cross_entropy(y_pred, y)
-            train_loss.append(loss.item())
-            
+        for img, X in tqdm(train_loader, desc="Train"):
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            img, X = X.to(args.device), img.to(args.device)
+
+            logit_img, logit_X = model(img, X)
+
+            gt = torch.arange(len(img), dtype=torch.long, device=args.device)
+
+            total_loss = (loss(logit_img, gt) + loss(logit_X, gt)) / 2
             
-            acc = accuracy(y_pred, y)
-            train_acc.append(acc.item())
+            total_loss.backward()
+            optimizer.step()
 
         model.eval()
         for X, y, subject_idxs in tqdm(val_loader, desc="Validation"):

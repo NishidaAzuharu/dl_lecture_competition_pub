@@ -23,7 +23,7 @@ def run(args: DictConfig):
     X = torch.load(os.path.join(data_dir, f"{split}_X.pt"))
     y = torch.load(os.path.join(data_dir, f"{split}_y.pt"))
     subject_idxs = torch.load(os.path.join(data_dir, f"{split}_subject_idxs.pt"))
-    print(y.shape)
+
     # print(X[0])
     # print(subject_idxs[10])
     # data_np = X.numpy()
