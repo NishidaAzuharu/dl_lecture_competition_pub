@@ -12,7 +12,16 @@ from tqdm import tqdm
 from src.datasets import ThingsMEGDataset
 from src.models import BasicConvClassifier
 from src.utils import set_seed
+import mne
+"""
+installation
 
+pip install -U mne
+pip install cupy
+MNE_USE_CUDA=true python -c "import mne; mne.cuda.init_cuda(verbose=True)"
+mne.utils.set_config('MNE_USE_CUDA', 'true')  
+# mne.io.Raw.filter()などにn_jobs='cuda'を渡す
+"""
 
 @hydra.main(version_base=None, config_path="configs", config_name="config") #configfileの指定
 def run(args: DictConfig):

@@ -79,6 +79,43 @@ class ConvBlock(nn.Module):
     
 
 
+class BasicWaveClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.blk = nn.Sequential(WaveBlock(8, 3, 12), WaveBlock)
+
+
+
+
+class WaveBlock(nn.Module):
+    def __init__(self, filters, kernel_size, n):
+        super(WaveBlock, self).__init__()
+        self.dilation_rates = [2 ** i for i in range(n)]
+        self.initial_conv = nn.Conv1d(in_channels=filters, out_channels=filters, kernel_size=1, padding='same')
+        self.tanh_convs = nn.ModuleList([
+            nn.Conv1d(in_channels=filters, out_channels=filters, kernel_size=kernel_size, padding='same', dilation=rate)
+            for rate in self.dilation_rates
+        ])
+        self.sigmoid_convs = nn.ModuleList([
+            nn.Conv1d(in_channels=filters, out_channels=filters, kernel_size=kernel_size, padding='same', dilation=rate)
+            for rate in self.dilation_rates
+        ])
+        self.final_convs = nn.ModuleList([
+            nn.Conv1d(in_channels=filters, out_channels=filters, kernel_size=1, padding='same')
+            for _ in self.dilation_rates
+        ])
+
+    def forward(self, x):
+        x = self.initial_conv(x)
+        res_x = x
+        for tanh_conv, sigmoid_conv, final_conv in zip(self.tanh_convs, self.sigmoid_convs, self.final_convs):
+            tanh_out = torch.tanh(tanh_conv(x))
+            sigm_out = torch.sigmoid(sigmoid_conv(x))
+            x = tanh_out * sigm_out
+            x = final_conv(x)
+            res_x = res_x + x
+        return res_x
+
     
 # class EEGInputModule(nn.Module):
 #     def __init__(self, input_size, hidden_size, num_layers):
@@ -305,11 +342,8 @@ class CLIP(nn.Module):
                  in_channels: int,
                  seq_len: int,
                  MEG_hid_dim: int,
-                 num_classes: int
                  ):
         super().__init__()
-
-
 
         #image encoder
         self.visual = ImageInputModule(embed_dim)

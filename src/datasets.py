@@ -24,22 +24,20 @@ def _transform(n_px):
 preprocess = _transform(256)
 
 class ThingsPretrainDataset(torch.utils.data.Dataset):
-    def __init__(self, split: str, image_size: int, data_dir: str = "data", img_data_dir: str = "images") -> None:
+    def __init__(self, split: str, image_size: int, data_dir: str = "data") -> None:
         super().__init__()
 
         assert split in ["train", "val"], f"Invalid split: {split}"
         self.split = split
-        self.num_classes = 1854
 
         self.image_size = image_size
-        label_encoder = LabelEncoder()
 
         self.X = torch.load(os.path.join(data_dir, f"{split}_X.pt"))
         path_list = []
         label_list = []
-        with open(os.path.join(img_data_dir, f"{split}_image_paths.txt"), 'r', encoding='utf-8') as file:
+        with open(os.path.join(data_dir, f"{split}_image_paths.txt"), 'r', encoding='utf-8') as file:
             for line in file:
-                path = os.path.join(img_data_dir, "images", line.strip())
+                path = os.path.join(data_dir, "images", line.strip())
                 label_list.append(os.path.dirname(line))
                 path_list.append(path)
 

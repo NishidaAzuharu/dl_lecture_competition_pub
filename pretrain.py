@@ -44,9 +44,9 @@ def run(args: DictConfig):
     # ------------------
     loader_args = {"batch_size": args.batch_size, "num_workers": args.num_workers}
     
-    train_set = ThingsPretrainDataset("train", args.data_dir)
+    train_set = ThingsPretrainDataset("train", args.image_size, args.data_dir)
     train_loader = torch.utils.data.DataLoader(train_set, shuffle=True, **loader_args)
-    val_set = ThingsPretrainDataset("val", args.data_dir)
+    val_set = ThingsPretrainDataset("val", args.image_size, args.data_dir)
     val_loader = torch.utils.data.DataLoader(val_set, shuffle=False, **loader_args)
     
 
