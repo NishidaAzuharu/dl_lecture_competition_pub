@@ -21,16 +21,20 @@ def _transform(n_px):
         ToTensor(),
         Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
     ])
-preprocess = _transform(256)
+
 
 class ThingsPretrainDataset(torch.utils.data.Dataset):
-    def __init__(self, split: str, image_size: int, data_dir: str = "data") -> None:
+    def __init__(self, split: str, input_image_size: int, data_dir: str = "data") -> None:
         super().__init__()
 
         assert split in ["train", "val"], f"Invalid split: {split}"
         self.split = split
 
-        self.image_size = image_size
+        self.input_image_size = input_image_size
+
+        self.preprocess = _transform(input_image_size)
+
+        self.split_sizes = [24, 33, 19, 20, 34, 24, 33, 19, 20, 34, 4, 3, 3, 1]
 
         self.X = torch.load(os.path.join(data_dir, f"{split}_X.pt"))
         path_list = []
@@ -50,8 +54,10 @@ class ThingsPretrainDataset(torch.utils.data.Dataset):
         return len(self.X)
     
     def __getitem__(self, i):
-        img = preprocess(Image.open(self.img_path[i]))
+        img = self.preprocess(Image.open(self.img_path[i]))
+        #return img, torch.split(self.X[i], self.split_sizes, dim=0)
         return img, self.X[i]
+    
     
     @property
     def num_img_channels(self) -> int:
@@ -59,7 +65,7 @@ class ThingsPretrainDataset(torch.utils.data.Dataset):
     
     @property
     def image_size(self) -> int:
-        return self.image_size * self.image_size
+        return self.input_image_size * self.input_image_size
     
     @property
     def num_channels(self) -> int:

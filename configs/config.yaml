@@ -1,8 +1,8 @@
 batch_size: 128
-epochs: 30
-lr: 0.001
+epochs: 64
+lr: 0.005
 
-pretrain_epochs: 150
+pretrain_epochs: 100
 
 image_size: 256
 device: cuda:0

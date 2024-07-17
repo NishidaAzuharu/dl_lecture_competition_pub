@@ -12,7 +12,7 @@ import torch.nn as nn
 
 from src.datasets import ThingsPretrainDataset
 from src.models import BasicConvClassifier, CLIP
-from src.utils import set_seed
+from src.utils import set_seed, CosineScheduler, set_lr
 
 
 config = {
@@ -30,6 +30,8 @@ config = {
     "mask_ratio": 0.75,
     "dropout": 0.
 }
+
+
 
 @hydra.main(version_base=None, config_path="configs", config_name="config") #configfileの指定
 def run(args: DictConfig):
@@ -53,77 +55,69 @@ def run(args: DictConfig):
     # ------------------
     #       Model
     # ------------------
-    model = CLIP(**config).to(args.device)
+    model = CLIP(args.image_size, 768, train_set.num_channels, train_set.seq_len, 128).to(args.device)
 
 
     # ------------------
     #     Optimizer
     # ------------------
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9,0.98),eps=1e-6, weight_decay=0.2)
+    warmup_length = 10
+    scheduler = CosineScheduler(args.pretrain_epochs, args.lr, warmup_length)
 
     # ------------------
     #   Start training
     # ------------------  
-    max_val_acc = 0
-    accuracy = Accuracy(
-        task="multiclass", num_classes=train_set.num_classes, top_k=10
-    ).to(args.device)
 
+    min_val_loss = 100000
+    grad_clip = 0.1
     loss = nn.CrossEntropyLoss()
     for epoch in range(args.pretrain_epochs):
-        print(f"Epoch {epoch+1}/{args.epochs}")
+        print(f"Epoch {epoch+1}/{args.pretrain_epochs}")
+        new_lr = scheduler(epoch)
+        set_lr(new_lr, optimizer)
         
-        train_loss, train_acc, val_loss, val_acc = [], [], [], []
+        train_loss, val_loss = [], []
         
         model.train()
         for img, X in tqdm(train_loader, desc="Train"):
-            optimizer.zero_grad()
-            img, X = X.to(args.device), img.to(args.device)
+            img, X = img.to(args.device), X.to(args.device)
 
             logit_img, logit_X = model(img, X)
 
             gt = torch.arange(len(img), dtype=torch.long, device=args.device)
 
             total_loss = (loss(logit_img, gt) + loss(logit_X, gt)) / 2
+
+            train_loss.append(total_loss.item())
             
             total_loss.backward()
+            nn.utils.clip_grad_value_(model.parameters(), grad_clip)
             optimizer.step()
+            optimizer.zero_grad()
 
         model.eval()
-        for X, y, subject_idxs in tqdm(val_loader, desc="Validation"):
-            X, y = X.to(args.device), y.to(args.device)
+        for img, X in tqdm(val_loader, desc="Validation"):
+            img, X = img.to(args.device), X.to(args.device)
             
             with torch.no_grad():
-                y_pred = model(X)
-            
-            val_loss.append(F.cross_entropy(y_pred, y).item())
-            val_acc.append(accuracy(y_pred, y).item())
+                logit_img, logit_X = model(img, X)
 
-        print(f"Epoch {epoch+1}/{args.epochs} | train loss: {np.mean(train_loss):.3f} | train acc: {np.mean(train_acc):.3f} | val loss: {np.mean(val_loss):.3f} | val acc: {np.mean(val_acc):.3f}")
-        torch.save(model.state_dict(), os.path.join(logdir, "model_last.pt"))
+            gt = torch.arange(len(img), dtype=torch.long, device=args.device)
+            
+            loss_ = (loss(logit_img, gt) + loss(logit_X, gt)) / 2
+            val_loss.append(loss_.item())
+
+        print(f"Epoch {epoch+1}/{args.pretrain_epochs} | train loss: {np.mean(train_loss):.3f} | val loss: {np.mean(val_loss):.3f}")
+        torch.save(model.state_dict(), os.path.join(logdir, "pretrained_model_last.pt"))
         if args.use_wandb:
-            wandb.log({"train_loss": np.mean(train_loss), "train_acc": np.mean(train_acc), "val_loss": np.mean(val_loss), "val_acc": np.mean(val_acc)})
+            wandb.log({"train_loss": np.mean(train_loss), "val_loss": np.mean(val_loss)})
         
-        if np.mean(val_acc) > max_val_acc:
+        if np.mean(val_loss) < min_val_loss:
             cprint("New best.", "cyan")
-            torch.save(model.state_dict(), os.path.join(logdir, "model_best.pt"))
-            max_val_acc = np.mean(val_acc)
+            torch.save(model.state_dict(), os.path.join(logdir, "pretrained_model_best.pt"))
+            min_val_loss = np.mean(val_loss)
             
-    
-    # ----------------------------------
-    #  Start evaluation with best model
-    # ----------------------------------
-    model.load_state_dict(torch.load(os.path.join(logdir, "model_best.pt"), map_location=args.device))
-
-    preds = [] 
-    model.eval()
-    for X, subject_idxs in tqdm(test_loader, desc="Validation"):        
-        preds.append(model(X.to(args.device)).detach().cpu())
-        
-    preds = torch.cat(preds, dim=0).numpy()
-    np.save(os.path.join(logdir, "submission"), preds)
-    cprint(f"Submission {preds.shape} saved at {logdir}", "cyan")
-
 
 if __name__ == "__main__":
     run()

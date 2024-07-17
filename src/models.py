@@ -13,6 +13,8 @@ from timm.models.layers import to_2tuple, trunc_normal_
 class BasicConvClassifier(nn.Module):
     def __init__(
         self,
+        num_classes: int,
+        seq_len: int,
         in_channels: int,
         hid_dim: int = 128
     ) -> None:
@@ -23,11 +25,11 @@ class BasicConvClassifier(nn.Module):
             ConvBlock(hid_dim, hid_dim),
         )
 
-        # self.head = nn.Sequential(
-        #     nn.AdaptiveAvgPool1d(1),
-        #     Rearrange("b d 1 -> b d"),
-        #     nn.Linear(hid_dim, num_classes),
-        # )
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            Rearrange("b d 1 -> b d"),
+            nn.Linear(hid_dim, num_classes),
+        )
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
         """_summary_
@@ -36,7 +38,9 @@ class BasicConvClassifier(nn.Module):
         Returns:
             X ( b, num_classes ): _description_
         """
-        return self.blocks(X)
+        X = self.blocks(X)
+
+        return self.head(X)
 
 
 class ConvBlock(nn.Module):
@@ -54,7 +58,7 @@ class ConvBlock(nn.Module):
 
         self.conv0 = nn.Conv1d(in_dim, out_dim, kernel_size, padding="same")
         self.conv1 = nn.Conv1d(out_dim, out_dim, kernel_size, padding="same")
-        self.conv2 = nn.Conv1d(out_dim, out_dim, kernel_size, padding="same")
+        self.conv2 = nn.Conv1d(out_dim, out_dim*2, kernel_size, padding="same")
         
         self.batchnorm0 = nn.BatchNorm1d(num_features=out_dim)
         self.batchnorm1 = nn.BatchNorm1d(num_features=out_dim)
@@ -78,14 +82,126 @@ class ConvBlock(nn.Module):
         return self.dropout(X)
     
 
+class CausalConv1d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, dilation):
+        super(CausalConv1d, self).__init__()
+        self.pad = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, 
+                              padding=self.pad, dilation=dilation)
+
+    def forward(self, x):
+        x = self.conv(x)
+        if self.pad > 0:
+            x = x[:, :, :-self.pad]
+        return x
+
+class WaveNetBlock_1(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, dilation, p_drop=0.2):
+        super(WaveNetBlock_1, self).__init__()
+        self.causal_conv = CausalConv1d(in_channels, out_channels, kernel_size, dilation)
+        self.batchnorm = nn.BatchNorm1d(out_channels)
+        self.dropout = nn.Dropout(p_drop)
+        self.conv1x1_residual = nn.Conv1d(out_channels, in_channels, kernel_size=1)
+        self.conv1x1_skip = nn.Conv1d(out_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        out = self.causal_conv(x)
+        out = self.batchnorm(out)
+        out = F.tanh(out) * F.sigmoid(out)
+        out = self.dropout(out)
+        residual = self.conv1x1_residual(out)
+        skip = self.conv1x1_skip(out)
+        return residual + x, skip
+
+class WaveNet_1(nn.Module):
+    def __init__(self, num_classes, num_channels, num_blocks, kernel_size, dilations):
+        super(WaveNet_1, self).__init__()
+        self.blocks = nn.ModuleList([
+            WaveNetBlock_1(num_channels, num_channels, kernel_size, dilation)
+            for dilation in dilations
+        ])
+        self.conv1x1 = nn.Conv1d(num_channels, num_classes, kernel_size=1)
+
+    def forward(self, x):
+        skip_connections = []
+        for block in self.blocks:
+            x, skip = block(x)
+            skip_connections.append(skip)
+        x = sum(skip_connections)
+        x = F.gelu(x)
+        x = self.conv1x1(x)
+        return F.adaptive_avg_pool1d(x, 1).squeeze(-1)
 
 class BasicWaveClassifier(nn.Module):
     def __init__(self):
         super().__init__()
-        self.blk = nn.Sequential(WaveBlock(8, 3, 12), WaveBlock)
+        self.blk = nn.Sequential(WaveBlock(8, 3, 12), WaveBlock())
 
 
+class ResidualBlock(nn.Module):
+    def __init__(self, residual_channels, dilation_channels, skip_channels, kernel_size, dilation):
+        super(ResidualBlock, self).__init__()
+        self.dilated_conv = nn.Conv1d(in_channels=residual_channels,
+                                      out_channels=dilation_channels,
+                                      kernel_size=kernel_size,
+                                      dilation=dilation,
+                                      padding="same")
+        self.residual_conv = nn.Conv1d(in_channels=dilation_channels,
+                                       out_channels=residual_channels,
+                                       kernel_size=1,
+                                       padding="same")
+        self.skip_conv = nn.Conv1d(in_channels=dilation_channels,
+                                   out_channels=skip_channels,
+                                   kernel_size=1,
+                                   padding="same")
+        self.gate_conv = nn.Conv1d(in_channels=residual_channels,
+                                   out_channels=dilation_channels,
+                                   kernel_size=kernel_size,
+                                   dilation=dilation,
+                                   padding="same")
 
+    def forward(self, x):
+        # Gated activation unit
+        output = torch.tanh(self.dilated_conv(x)) * torch.sigmoid(self.gate_conv(x))
+        # For skip connection
+        skip = self.skip_conv(output)
+        # For residual connection
+        residual = self.residual_conv(output) + x
+        return residual, skip
+
+class WaveNet(nn.Module):
+    def __init__(self, residual_channels, dilation_channels, skip_channels, end_channels, kernel_size, num_layers, num_stacks):
+        super(WaveNet, self).__init__()
+        self.residual_channels = residual_channels
+        self.dilation_channels = dilation_channels
+        self.skip_channels = skip_channels
+        self.end_channels = end_channels
+        self.kernel_size = kernel_size
+        self.num_layers = num_layers
+        self.num_stacks = num_stacks
+
+        
+        self.residual_blocks = nn.ModuleList()
+        for s in range(num_stacks):
+            for l in range(num_layers):
+                self.residual_blocks.append(ResidualBlock(residual_channels, dilation_channels, skip_channels, kernel_size, dilation=2**l))
+        
+        self.conv_out1 = nn.Conv1d(in_channels=skip_channels, out_channels=end_channels, kernel_size=1)
+        self.conv_out2 = nn.Conv1d(in_channels=end_channels, out_channels=1, kernel_size=1)
+
+    def forward(self, x):
+        skip_connections = []
+
+        for layer in self.residual_blocks:
+            x, skip = layer(x)
+            skip_connections.append(skip)
+
+        out = sum(skip_connections)
+        out = F.relu(out)
+        out = self.conv_out1(out)
+        out = F.relu(out)
+        out = self.conv_out2(out)
+        return out
 
 class WaveBlock(nn.Module):
     def __init__(self, filters, kernel_size, n):
@@ -117,203 +233,7 @@ class WaveBlock(nn.Module):
         return res_x
 
     
-# class EEGInputModule(nn.Module):
-#     def __init__(self, input_size, hidden_size, num_layers):
-#         super(EEGInputModule, self).__init__()
-#         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-#         self.fc = nn.Linear(hidden_size, 128)  # 128次元の潜在空間にマッピング
 
-#     def forward(self, x):
-#         h0 = torch.zeros(self.lstm.num_layers, x.size(0), self.lstm.hidden_size).to(x.device)
-#         c0 = torch.zeros(self.lstm.num_layers, x.size(0), self.lstm.hidden_size).to(x.device)
-#         out, _ = self.lstm(x, (h0, c0))
-#         out = out[:, -1, :]  # 最後のタイムステップの出力を使用
-#         out = self.fc(out)
-#         return out
-    
-# class CommonEncoder(nn.Module):
-#     def __init__(self):
-#         super(CommonEncoder, self).__init__()
-#         self.fc = nn.Linear(128, 128)  # 共通のエンコーダ部分
-
-#     def forward(self, x):
-#         x = self.fc(x)
-#         return x
-
-# class Classifier(nn.Module):
-#     def __init__(self, num_classes):
-#         super(Classifier, self).__init__()
-#         self.fc = nn.Linear(128, num_classes)
-
-#     def forward(self, x):
-#         x = self.fc(x)
-#         return x
-
-# class MultimodalModel(nn.Module):
-#     def __init__(self, eeg_input_size, eeg_hidden_size, eeg_num_layers, num_classes):
-#         super(MultimodalModel, self).__init__()
-#         self.image_input = ImageInputModule()
-#         self.eeg_input = EEGInputModule(eeg_input_size, eeg_hidden_size, eeg_num_layers)
-#         self.common_encoder = CommonEncoder()
-#         self.classifier = Classifier(num_classes)
-    
-#     def forward_image(self, image_data):
-#         image_features = self.image_input(image_data)
-#         encoded_features = self.common_encoder(image_features)
-#         class_scores = self.classifier(encoded_features)
-#         return class_scores
-    
-#     def forward_eeg(self, eeg_data):
-#         eeg_features = self.eeg_input(eeg_data)
-#         encoded_features = self.common_encoder(eeg_features)
-#         class_scores = self.classifier(encoded_features)
-#         return class_scores
-    
-
-class model_3(nn.Module):
-    def __init__(self, in_channels, hid_dim, num_classes):
-        super().__init__()
-        self.input_blocks = nn.Sequential(
-            ConvBlock(in_channels, hid_dim),
-            ConvBlock(hid_dim, hid_dim),
-        )
-        self.model = ViTForImageClassification.from_pretrained('google/vit-base-patch16-224').vit
-        self.enc_bloack = self.model.encoder #in_features:768
-        self.layer_norm = self.model.layernorm
-        self.classifier_head = nn.Linear(hid_dim, num_classes)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.input_blocks(x)
-        x = x.permute(0, 2, 1) 
-        x = self.enc_bloack(x).last_hidden_state
-        x = self.layer_norm(x)
-        x = x[:, 0]
-        x = self.classifier_head(x)
-        return x
-
-
-# class ConvBlock(nn.Module):
-#     def __init__(self, in_channels, out_channels):
-#         super(ConvBlock, self).__init__()
-#         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-#         self.bn = nn.BatchNorm2d(out_channels)
-#         self.relu = nn.ReLU()
-        
-#     def forward(self, x):
-#         return self.relu(self.bn(self.conv(x)))
-
-# class model_3(nn.Module):
-#     def __init__(self, in_channels, hid_dim, num_classes, device = "cuda"):
-#         super().__init__()
-#         self.input_blocks = nn.Sequential(
-#             ConvBlock(in_channels, hid_dim),
-#             ConvBlock(hid_dim, hid_dim),
-#         )
-#         self.model = ViTForImageClassification.from_pretrained('google/vit-base-patch16-224').vit
-#         self.enc_block = self.model.encoder
-#         self.layer_norm = self.model.layernorm
-#         self.classifier_head = nn.Linear(768, num_classes)  # 768はViTの出力次元
-        
-#     def forward(self, x):
-#         x = self.input_blocks(x)
-#         # ViTは特定の形状の入力を期待しているため、画像を適切な形状に変換する必要があります。
-#         batch_size = x.shape[0]
-#         x = x.reshape(batch_size, 3, 224, 224)  # 入力画像の形状にリシェープ
-#         x = self.model.embeddings(x)  # ViTの埋め込み層を通過
-#         x = self.enc_block(x)
-#         x = self.layer_norm(x)
-#         x = x[:, 0]  # クラストークンを抽出
-#         x = self.classifier_head(x)
-#         return x
-
-            
-class PatchEmbed(nn.Module):
-    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
-        super().__init__()
-
-        img_size = to_2tuple(img_size)
-        patch_size = to_2tuple(patch_size)
-        num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0])
-        self.img_size = img_size
-        self.patch_size = patch_size
-        self.num_patches = num_patches
-
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-
-    def forward(self, x):
-        x = self.proj(x).flatten(2).transpose(1, 2)
-        return x
-
-class pretrained_model(nn.Module):
-    def __init__(self, num_classes, channel, seq_len):
-        super(pretrained_model, self).__init__()
-
-
-        timm.models.vision_transformer.PatchEmbed = PatchEmbed
-        self.v = timm.create_model('vit_deit_small_distilled_patch16_224', pretrained=True)
-        self.original_num_patches = self.v.patch_embed.num_patches
-        self.original_hw = int(self.original_num_patches ** 0.5)
-        self.original_embedding_dim = self.v.pos_embed.shape[2]
-        self.mlp_head = nn.Sequential(nn.LayerNorm(self.original_embedding_dim), nn.Linear(self.original_embedding_dim, num_classes))
-        f_dim, t_dim = self.get_shape(10, 10, channel, seq_len)
-        num_patches = f_dim * t_dim
-        self.v.patch_embed.num_patches = num_patches
-
-        new_proj = nn.Conv2d(1, self.original_embedding_dim, kernel_size=(16, 16), stride=(10, 10))
-        new_proj.weight = nn.Parameter(torch.sum(self.v.patch_embed.proj.weight, dim=1).unsqueeze(1))
-        new_proj.bias = self.v.patch_embed.proj.bias
-        self.v.patch_embed.proj = new_proj
-
-        
-        # get the positional embedding from deit model, skip the first two tokens (cls token and distillation token), reshape it to original 2D shape (24*24).
-        new_pos_embed = self.v.pos_embed[:, 2:, :].detach().reshape(1, self.original_num_patches, self.original_embedding_dim).transpose(1, 2).reshape(1, self.original_embedding_dim, self.original_hw, self.original_hw)
-        # cut (from middle) or interpolate the second dimension of the positional embedding
-        if t_dim <= self.original_hw:
-            new_pos_embed = new_pos_embed[:, :, :, int(self.original_hw / 2) - int(t_dim / 2): int(self.original_hw / 2) - int(t_dim / 2) + t_dim]
-        else:
-            new_pos_embed = torch.nn.functional.interpolate(new_pos_embed, size=(self.original_hw, t_dim), mode='bilinear')
-        # cut (from middle) or interpolate the first dimension of the positional embedding
-        if f_dim <= self.original_hw:
-            new_pos_embed = new_pos_embed[:, :, int(self.original_hw / 2) - int(f_dim / 2): int(self.original_hw / 2) - int(f_dim / 2) + f_dim, :]
-        else:
-            new_pos_embed = torch.nn.functional.interpolate(new_pos_embed, size=(f_dim, t_dim), mode='bilinear')
-        # flatten the positional embedding
-        new_pos_embed = new_pos_embed.reshape(1, self.original_embedding_dim, num_patches).transpose(1,2)
-        # concatenate the above positional embedding with the cls token and distillation token of the deit model.
-        self.v.pos_embed = nn.Parameter(torch.cat([self.v.pos_embed[:, :2, :].detach(), new_pos_embed], dim=1))
-        
-        # new_pos_embed = nn.Parameter(torch.zeros(1, self.v.patch_embed.num_patches + 2, self.original_embedding_dim))
-        # self.v.pos_embed = new_pos_embed
-        # trunc_normal_(self.v.pos_embed, std=.02)
-
-    
-    def get_shape(self, f_stride, t_stride, input_f_dim, input_t_dim):
-        test_input = torch.randn(1, 1, input_f_dim, input_t_dim)
-        test_proj = nn.Conv2d(1, self.original_embedding_dim, kernel_size=(16, 16), stride=(f_stride, t_stride))
-        test_out = test_proj(test_input)
-        f_dim = test_out.shape[2]
-        t_dim = test_out.shape[3]
-        return f_dim, t_dim
-    
-    def forward(self, x):
-        x = x.unsqueeze(1)
-        B = x.shape[0]
-        x = self.v.patch_embed(x)
-
-        cls_tokens = self.v.cls_token.expand(B, -1, -1)
-        dist_token = self.v.dist_token.expand(B, -1, -1)
-        x = torch.cat((cls_tokens, dist_token, x), dim = 1)
-        x = x + self.v.pos_embed
-        x = self.v.pos_drop(x)
-        for blk in self.v.blocks:
-            x = blk(x)
-        x = self.v.norm(x)
-        x = (x[:, 0] + x[:, 1]) / 2
-
-        x = self.mlp_head(x)
-
-        return x
-    
 import torchvision.models as models
 
 
@@ -330,20 +250,55 @@ class ImageInputModule(nn.Module):
         x = x.view(x.size(0), -1)  # フラットに変換
         x = self.fc(x)
         return x
+    
+
+class WaveEncoerModule(nn.Module):
+    def __init__(self, input_dims):
+        super(WaveEncoerModule, self).__init__()
+
+        self.dims = input_dims
+        self.blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv1d(in_channels=dim, out_channels=32, kernel_size=1),
+                WaveNet(32, 32, 256, 256, 2, 10, 2),
+                #WaveBlock(filters=12 , kernel_size=3, n=12),
+                nn.AdaptiveAvgPool1d(1)
+            )
+            for dim in input_dims
+        ])
+        efficientnet = models.efficientnet_v2_s(pretrained=False)
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 24, kernel_size=3, stride=2, padding=1, bias=False),  # 入力チャンネルを1に変更
+            *list(efficientnet.features.children())[1:]
+        )
+        
+
+    def forward(self, x):
+        features = [block(data).squeeze(-1) for block, data in zip(self.blocks, torch.split(x, self.dims, dim=1))] #(128, 12) × 14 <- list
+        
+        # 特徴を結合
+        combined_features = torch.cat(features, dim=1) #(128, 12*14)
+        
+        # 2D Imageの形に変換
+        combined_features = combined_features.view(combined_features.size(0), 1, -1, 1)
+        
+        # EfficientNet V2 Smallを通す
+        x = self.features(combined_features)
+        x = x.view(x.size(0), -1)  # フラットに変換
+        return x
 
 
-from typing import Tuple, Union
 class CLIP(nn.Module):
     def __init__(self,
                  image_feature_size: int,
                  embed_dim: int,
-                 # vision
-                 # brain wave
                  in_channels: int,
                  seq_len: int,
                  MEG_hid_dim: int,
                  ):
         super().__init__()
+
+        dims = [24, 33, 19, 20, 34, 24, 33, 19, 20, 34, 4, 3, 3, 1]
 
         #image encoder
         self.visual = ImageInputModule(embed_dim)
@@ -351,8 +306,9 @@ class CLIP(nn.Module):
 
         #brain wave encoder
         #self.brainwave_encoder = pretrained_model()
-        self.MEG_encoder = BasicConvClassifier(in_channels=in_channels, hid_dim=MEG_hid_dim)
-        self.fc = nn.Linear(MEG_hid_dim, embed_dim)
+        self.MEG_encoder = WaveEncoerModule(dims)
+        self.fc = nn.Linear(1280*6, embed_dim)
+        #self.MEG_encoder = nn.Sequential(BasicConvClassifier(in_channels=in_channels, hid_dim=MEG_hid_dim), nn.Linear(MEG_hid_dim, embed_dim))
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
@@ -362,10 +318,10 @@ class CLIP(nn.Module):
         return self.visual.conv1.weight.dtype
 
     def encode_image(self, image_x):
-        return self.visual(image_x.type(self.dtype))
+        return self.visual(image_x)
     
     def encode_MEG(self, x):
-        x = self.fc(self.MEG_encoder(x))
+        return self.fc(self.MEG_encoder(x))
 
     def forward(self, image, x):
         image_features = self.encode_image(image)
@@ -376,6 +332,27 @@ class CLIP(nn.Module):
 
         logit_scale = self.logit_scale.exp()
         logit_per_image = logit_scale * image_features @ x_features.t()
-        logit_per_x = logit_per_x.t()
+        logit_per_x = logit_per_image.t()
 
         return logit_per_image, logit_per_x
+
+
+
+class FT_model(nn.Module):
+    def __init__(self,
+                pretrain_path, 
+                num_classes,
+                image_feature_size: int,
+                embed_dim: int,
+                in_channels: int,
+                seq_len: int,
+                MEG_hid_dim: int,
+                ):
+        super().__init__()
+        pretrained_model = CLIP(image_feature_size, embed_dim, in_channels, seq_len, MEG_hid_dim)
+        #pretrained_model.load_state_dict(torch.load(pretrain_path))
+
+        self.FT_model = nn.Sequential(pretrained_model.MEG_encoder, nn.Linear(1280, num_classes))
+
+    def forward(self, x):
+        return self.FT_model(x)

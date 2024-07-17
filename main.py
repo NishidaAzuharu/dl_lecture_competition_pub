@@ -11,7 +11,7 @@ from termcolor import cprint
 from tqdm import tqdm
 
 from src.datasets import ThingsMEGDataset
-from src.models import BasicConvClassifier, model_3, pretrained_model
+from src.models import BasicConvClassifier, FT_model, WaveNet_1
 from src.utils import set_seed, get_lr
 
 
@@ -42,9 +42,15 @@ def run(args: DictConfig):
     # ------------------
     #model = BasicConvClassifier(train_set.num_classes, train_set.seq_len, train_set.num_channels).to(args.device)
 
+    num_blocks = 12
+    dilations = [2**i for i in range(num_blocks)]
+    model = WaveNet_1(train_set.num_classes, train_set.num_channels, num_blocks, 2, dilations).to(args.device)
+
+
     #model = model_3(train_set.num_channels, 768, train_set.num_classes).to(args.device)
 
-    model = pretrained_model(train_set.num_classes, train_set.num_channels, train_set.seq_len).to(args.device)
+    #model = pretrained_model(train_set.num_classes, train_set.num_channels, train_set.seq_len).to(args.device)
+    #model = FT_model("", train_set.num_classes, args.image_size, 768, train_set.num_channels, train_set.seq_len, 128).to(args.device)
 
 
 
