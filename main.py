@@ -11,8 +11,8 @@ from termcolor import cprint
 from tqdm import tqdm
 
 from src.datasets import ThingsMEGDataset
-from src.models import BasicConvClassifier, FT_model, WaveNet_1
-from src.utils import set_seed, get_lr
+from src.models import BasicConvClassifier, WaveNet
+from src.utils import set_seed
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="config") #configfileの指定
@@ -41,24 +41,18 @@ def run(args: DictConfig):
     #       Model
     # ------------------
     #model = BasicConvClassifier(train_set.num_classes, train_set.seq_len, train_set.num_channels).to(args.device)
-
-    num_blocks = 12
+    
+    num_blocks = 10
     dilations = [2**i for i in range(num_blocks)]
-    model = WaveNet_1(train_set.num_classes, train_set.num_channels, num_blocks, 2, dilations).to(args.device)
-
-
-    #model = model_3(train_set.num_channels, 768, train_set.num_classes).to(args.device)
-
-    #model = pretrained_model(train_set.num_classes, train_set.num_channels, train_set.seq_len).to(args.device)
-    #model = FT_model("", train_set.num_classes, args.image_size, 768, train_set.num_channels, train_set.seq_len, 128).to(args.device)
-
-
+    model = WaveNet(train_set.num_classes, train_set.num_channels, num_blocks, 2, dilations).to(args.device)
+    model.load_state_dict(torch.load("model_best.pt", map_location=args.device))
 
     # ------------------
     #     Optimizer
     # ------------------
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.OneCycleLR(optimizer, 0.01, epochs=args.epochs, steps_per_epoch=len(train_loader))
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    sched = torch.optim.lr_scheduler.OneCycleLR(optimizer, 0.05, epochs=args.epochs, steps_per_epoch=len(train_loader))
+    #sched =  torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=5, eta_min=0)
     grad_clip = 0.1
 
     # ------------------
@@ -83,7 +77,6 @@ def run(args: DictConfig):
             loss = F.cross_entropy(y_pred, y)
             train_loss.append(loss.item())
             
-            optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_value_(model.parameters(), grad_clip)
             optimizer.step()

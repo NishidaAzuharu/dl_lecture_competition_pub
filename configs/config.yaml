@@ -1,10 +1,8 @@
 batch_size: 128
-epochs: 64
+epochs: 50
 lr: 0.005
 
-pretrain_epochs: 100
 
-image_size: 256
 device: cuda:0
 num_workers: 4
 seed: 1234
